@@ -3,19 +3,16 @@ import numpy as np
 import pandas as pd
 import time
 import datetime
-import threading
 from ultralytics import YOLO  # ensure ultralytics is installed
-from utils import store_today_data, load_sheet_data
+from utils import store_today_data, load_sheet_data, model, transform
 from streamlit_webrtc import webrtc_streamer
 import av
+from streamlit_autorefresh import st_autorefresh
 
-# --- Global counter and lock (do not update st.session_state directly in video threads) ---
-if "global_counts" not in st.session_state:
-    st.session_state.global_counts = {"car": 0, "bus": 0, "truck": 0}
-counter_lock = threading.Lock()
+# Initialize session_state safely
+st.session_state.setdefault("global_counts", {"car": 0, "bus": 0, "truck": 0})
 
 # --- Load YOLOv8 model ---
-model = YOLO("yolov8n.pt")
 
 st.header("Vehicle Detection App")
 st.subheader("Detect vehicles in a video stream")
@@ -40,38 +37,18 @@ with col1:
         st.bar_chart(sheet_df.set_index("Date"), use_container_width=True)
         st.write("Detected vehicles over time.")
 
-    # Placeholder for live metrics (to be updated periodically)
-    metrics_placeholder = st.empty()
+    # Live metrics display refreshed automatically
+    mcols = st.columns(3)
+    mcols[0].metric("Car", st.session_state.global_counts["car"])
+    mcols[1].metric("Bus", st.session_state.global_counts["bus"])
+    mcols[2].metric("Truck", st.session_state.global_counts["truck"])
 
-
-# --- Video frame transform callback using streamlit_webrtc ---
-def transform(frame):
-    # Convert incoming frame to ndarray (BGR)
-    img = frame.to_ndarray(format="bgr24")
-    results = model(img)
-    if results and results[0].boxes is not None:
-        # Update global counts (thread-safe)
-        classes = results[0].boxes.cls.cpu().numpy().astype(int)
-        for cls in classes:
-            label = model.model.names[cls]
-            if label in st.session_state.global_counts:
-                with counter_lock:
-                    st.session_state.global_counts[label] += 1
-        # Annotate frame (draw boxes, etc.)
-        annotated = results[0].plot()
-    else:
-        annotated = img
-    # Return new frame in the correct format
-    return av.VideoFrame.from_ndarray(annotated, format="bgr24")
-
-
-# --- Start streamlit_webrtc ---
 with col2:
     st.subheader("Camera Stream")
     st.write("Camera stream will be displayed here using streamlit_webrtc.")
     webrtc_streamer(
         key="example",
-        video_frame_callback=transform,
+        video_frame_callback=lambda frame: transform(frame),
         rtc_configuration={
             "max_frames_per_second": 30,
             "iceServers": [
@@ -87,23 +64,10 @@ with col2:
     )
 
 
-# --- Background thread to update metrics display periodically ---
-def update_metrics():
-    while True:
-        with counter_lock:
-            car = st.session_state.global_counts["car"]
-            bus = st.session_state.global_counts["bus"]
-            truck = st.session_state.global_counts["truck"]
-        mcols = metrics_placeholder.columns(3)
-        mcols[0].metric("Car", car)
-        mcols[1].metric("Bus", bus)
-        mcols[2].metric("Truck", truck)
-        time.sleep(1)  # update every second
+# Auto-refresh the app every second without using threading for UI updates
+st_autorefresh(interval=60000, key="refresh_metrics")
 
-
-threading.Thread(target=update_metrics, daemon=True).start()
-
-# --- Optionally, store end-of-day data ---
+# Optionally, store end-of-day data
 now = datetime.datetime.now().time()
 if now.hour == 23 and now.minute >= 59:
     store_today_data(
